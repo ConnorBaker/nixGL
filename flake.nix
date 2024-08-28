@@ -4,8 +4,14 @@
   inputs.flake-utils.url = "github:numtide/flake-utils";
   inputs.nixpkgs.url = "github:nixos/nixpkgs";
 
-  outputs = { self, nixpkgs, flake-utils }:
-    (flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    (flake-utils.lib.eachDefaultSystem (
+      system:
       let
         isIntelX86Platform = system == "x86_64-linux";
         pkgs = import ./default.nix {
@@ -13,7 +19,8 @@
           enable32bits = isIntelX86Platform;
           enableIntelX86Extensions = isIntelX86Platform;
         };
-      in rec {
+      in
+      rec {
 
         packages = {
           # makes it easy to use "nix run nixGL --impure -- program"
@@ -29,17 +36,22 @@
 
         # deprecated attributes for retro compatibility
         defaultPackage = packages;
-      })) // rec {
-        # deprecated attributes for retro compatibility
-        overlay = overlays.default;
-        overlays.default = final: _:
-          let isIntelX86Platform = final.system == "x86_64-linux";
-          in {
-            nixgl = import ./default.nix {
-              pkgs = final;
-              enable32bits = isIntelX86Platform;
-              enableIntelX86Extensions = isIntelX86Platform;
-            };
+      }
+    ))
+    // rec {
+      # deprecated attributes for retro compatibility
+      overlay = overlays.default;
+      overlays.default =
+        final: _:
+        let
+          isIntelX86Platform = final.system == "x86_64-linux";
+        in
+        {
+          nixgl = import ./default.nix {
+            pkgs = final;
+            enable32bits = isIntelX86Platform;
+            enableIntelX86Extensions = isIntelX86Platform;
           };
-      };
+        };
+    };
 }
