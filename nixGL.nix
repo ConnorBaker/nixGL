@@ -14,77 +14,100 @@
   # This is one by default, you can switch it to off if you want to reduce a
   # bit the size of nixGL closure.
   enable32bits ? stdenv.hostPlatform.isx86,
-  stdenv,
-  writeTextFile,
-  shellcheck,
-  pcre,
-  runCommand,
-  linuxPackages,
-  fetchurl,
-  lib,
-  runtimeShell,
   bumblebee,
-  libglvnd,
-  vulkan-validation-layers,
-  mesa,
-  libvdpau-va-gl,
-  intel-media-driver,
-  pkgsi686Linux,
   driversi686Linux,
-  zlib,
-  libdrm,
-  xorg,
-  wayland,
+  fetchurl,
   gcc,
+  intel-media-driver,
+  lib,
+  libdrm,
+  libglvnd,
+  libvdpau-va-gl,
+  linuxPackages,
+  mesa,
+  pcre,
+  pkgsi686Linux,
+  runCommand,
+  shellcheck,
+  stdenv,
+  substitute,
+  vulkan-validation-layers,
+  wayland,
+  writeShellApplication,
+  xorg,
+  zlib,
   zstd,
 }:
 
 let
+  inherit (lib.lists) optionals;
+  inherit (lib.meta) getExe';
+  inherit (lib.strings) concatMapStringsSep makeLibraryPath makeSearchPathOutput optionalString;
+
   writeExecutable =
-    { name, text }:
-    writeTextFile {
-      inherit name text;
+    {
+      name,
+      envSetupText,
+      epilogueText,
+    }:
+    writeShellApplication {
+      inherit name;
 
-      executable = true;
-      destination = "/bin/${name}";
-
-      checkPhase = ''
-        ${shellcheck}/bin/shellcheck "$out/bin/${name}"
-
-        # Check that all the files listed in the output binary exists
-        for i in $(${pcre}/bin/pcregrep  -o0 '/nix/store/.*?/[^ ":]+' $out/bin/${name})
-        do
-          ls $i > /dev/null || (echo "File $i, referenced in $out/bin/${name} does not exists."; exit -1)
-        done
+      text = ''
+        ${envSetupText}
+        ${epilogueText}
       '';
+
+      # Check that all the files listed in the output binary exists
+      derivationArgs = {
+        passthru = {
+          inherit envSetupText epilogueText;
+        };
+        postCheck = ''
+          for i in $(${getExe' pcre "pcre"}  -o0 '/nix/store/.*?/[^ ":]+' $out/bin/${name})
+          do
+            ls $i > /dev/null || (echo "File $i, referenced in $out/bin/${name} does not exists."; exit -1)
+          done
+        '';
+      };
     };
 
   writeNixGL =
     name: vadrivers:
     writeExecutable {
       inherit name;
-      # add the 32 bits drivers if needed
-      text =
+
+      envSetupText =
         let
-          mesa-drivers = [ mesa.drivers ] ++ lib.optional enable32bits pkgsi686Linux.mesa.drivers;
-          libvdpau = [ libvdpau-va-gl ] ++ lib.optional enable32bits pkgsi686Linux.libvdpau-va-gl;
-          glxindirect = runCommand "mesa_glxindirect" { } (''
+          mesa-drivers = [ mesa.drivers ] ++ optionals enable32bits [ pkgsi686Linux.mesa.drivers ];
+          libvdpau = [ libvdpau-va-gl ] ++ optionals enable32bits [ pkgsi686Linux.libvdpau-va-gl ];
+          libglvnds = [ libglvnd ] ++ optionals enable32bits [ pkgsi686Linux.libglvnd ];
+          glxindirect = runCommand "mesa_glxindirect" { } ''
             mkdir -p $out/lib
             ln -s ${mesa.drivers}/lib/libGLX_mesa.so.0 $out/lib/libGLX_indirect.so.0
-          '');
+          '';
         in
         ''
-          #!${runtimeShell}
-          export LIBGL_DRIVERS_PATH=${lib.makeSearchPathOutput "lib" "lib/dri" mesa-drivers}
-          export LIBVA_DRIVERS_PATH=${lib.makeSearchPathOutput "out" "lib/dri" (mesa-drivers ++ vadrivers)}
-          ${
-            ''export __EGL_VENDOR_LIBRARY_FILENAMES=${mesa.drivers}/share/glvnd/egl_vendor.d/50_mesa.json${lib.optionalString enable32bits ":${pkgsi686Linux.mesa.drivers}/share/glvnd/egl_vendor.d/50_mesa.json"}"''${__EGL_VENDOR_LIBRARY_FILENAMES:+:$__EGL_VENDOR_LIBRARY_FILENAMES}"''
-          }
-          export LD_LIBRARY_PATH=${lib.makeLibraryPath mesa-drivers}:${
-            lib.makeSearchPathOutput "lib" "lib/vdpau" libvdpau
-          }:${glxindirect}/lib:${lib.makeLibraryPath [ libglvnd ]}"''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          exec "$@"
+          export LIBGL_DRIVERS_PATH=${makeSearchPathOutput "lib" "lib/dri" mesa-drivers}
+          export LIBVA_DRIVERS_PATH=${makeSearchPathOutput "out" "lib/dri" (mesa-drivers ++ vadrivers)}
+          export __EGL_VENDOR_LIBRARY_FILENAMES=${
+            concatMapStringsSep ":" (drivers: drivers + "/share/glvnd/egl_vendor.d/50_mesa.json") mesa-drivers
+          }"''${__EGL_VENDOR_LIBRARY_FILENAMES:+:$__EGL_VENDOR_LIBRARY_FILENAMES}"
+          export LD_LIBRARY_PATH=${
+            makeLibraryPath (
+              mesa-drivers
+              ++ [
+                (makeSearchPathOutput "lib" "lib/vdpau" libvdpau)
+                "${glxindirect}/lib"
+              ]
+              ++ libglvnds
+            )
+          }"''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         '';
+
+      epilogueText = ''
+        exec "$@"
+      '';
     };
   top = rec {
     /*
@@ -96,8 +119,8 @@ let
         version,
         sha256 ? null,
       }:
-      rec {
-        nvidiaDrivers = (linuxPackages.nvidia_x11.override { }).overrideAttrs (oldAttrs: rec {
+      let
+        nvidiaDrivers = linuxPackages.nvidia_x11.overrideAttrs (prevAttrs: {
           pname = "nvidia";
           name = "nvidia-x11-${version}-nixGL";
           inherit version;
@@ -107,7 +130,7 @@ let
             in
             if sha256 != null then fetchurl { inherit url sha256; } else builtins.fetchurl url;
           useGLVND = true;
-          nativeBuildInputs = oldAttrs.nativeBuildInputs or [ ] ++ [ zstd ];
+          nativeBuildInputs = prevAttrs.nativeBuildInputs or [ ] ++ [ zstd ];
         });
 
         nvidiaLibsOnly = nvidiaDrivers.override {
@@ -115,68 +138,64 @@ let
           kernel = null;
         };
 
-        nixGLNvidiaBumblebee = writeExecutable {
-          name = "nixGLNvidiaBumblebee-${version}";
-          text = ''
-            #!${runtimeShell}
-            export LD_LIBRARY_PATH=${
-              lib.makeLibraryPath [ nvidiaDrivers ]
-            }"''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-            ${
-              bumblebee.override {
-                nvidia_x11 = nvidiaDrivers;
-                nvidia_x11_i686 = nvidiaDrivers.lib32;
-              }
-            }/bin/optirun --ldpath ${
-              lib.makeLibraryPath (
-                [
-                  libglvnd
-                  nvidiaDrivers
-                ]
-                ++ lib.optionals enable32bits [
-                  nvidiaDrivers.lib32
-                  pkgsi686Linux.libglvnd
-                ]
-              )
-            } "$@"
-          '';
-        };
-
         # TODO: 32bit version? Not tested.
         nixNvidiaWrapper =
           api:
           writeExecutable {
             name = "nix${api}Nvidia-${version}";
-            text = ''
-              #!${runtimeShell}
-              ${lib.optionalString (
-                api == "Vulkan"
-              ) "export VK_LAYER_PATH=${vulkan-validation-layers}/share/vulkan/explicit_layer.d"}
-              NVIDIA_JSON=(${nvidiaLibsOnly}/share/glvnd/egl_vendor.d/*nvidia.json)
-              ${lib.optionalString enable32bits "NVIDIA_JSON32=(${nvidiaLibsOnly.lib32}/share/glvnd/egl_vendor.d/*nvidia.json)"}
-
-              ${
-                ''export __EGL_VENDOR_LIBRARY_FILENAMES=''${NVIDIA_JSON[*]}${lib.optionalString enable32bits '':''${NVIDIA_JSON32[*]}''}"''${__EGL_VENDOR_LIBRARY_FILENAMES:+:$__EGL_VENDOR_LIBRARY_FILENAMES}"''
-              }
-
-                ${
-                  lib.optionalString (api == "Vulkan")
-                    ''export VK_ICD_FILENAMES=${nvidiaLibsOnly}/share/vulkan/icd.d/nvidia_icd.x86_64.json${lib.optionalString enable32bits ":${nvidiaLibsOnly.lib32}/share/vulkan/icd.d/nvidia_icd.i686.json"}"''${VK_ICD_FILENAMES:+:$VK_ICD_FILENAMES}"''
-                }
+            envSetupText =
+              let
+                isVulkan = api == "Vulkan";
+                nvidia-libs = [nvidiaLibsOnly] ++ optionals enable32bits [ nvidiaLibsOnly.lib32 ];
+                libglvnds = [ libglvnd ] ++ optionals enable32bits [ pkgsi686Linux.libglvnd ];
+              in
+              # General setup
+              ''
+                export __EGL_VENDOR_LIBRARY_FILENAMES=${
+                  concatMapStringsSep ":" (libs: libs + "/share/glvnd/egl_vendor.d/10_nvidia.json") nvidia-libs
+                }"''${__EGL_VENDOR_LIBRARY_FILENAMES:+:$__EGL_VENDOR_LIBRARY_FILENAMES}"
+              ''
+              # Vulkan-specific variables
+              + optionalString isVulkan ''
+                export VK_LAYER_PATH=${vulkan-validation-layers}/share/vulkan/explicit_layer.d
+                export VK_ICD_FILENAMES=${
+                  concatMapStringsSep ":" (libs: libs + "/share/vulkan/icd.d/nvidia_icd.x86_64.json") nvidia-libs
+                }"''${VK_ICD_FILENAMES:+:$VK_ICD_FILENAMES}"
+              ''
+              # Update LD_LIBRARY_PATH
+              + ''
                 export LD_LIBRARY_PATH=${
-                  lib.makeLibraryPath (
-                    [
-                      libglvnd
-                      nvidiaLibsOnly
-                    ]
-                    ++ lib.optional (api == "Vulkan") vulkan-validation-layers
-                    ++ lib.optionals enable32bits [
-                      nvidiaLibsOnly.lib32
-                      pkgsi686Linux.libglvnd
-                    ]
-                  )
+                  makeLibraryPath (nvidia-libs ++ libglvnds ++ optionals isVulkan [ vulkan-validation-layers ])
                 }"''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-                exec "$@"
+              '';
+            epilogueText = ''
+              exec "$@"
+            '';
+          };
+      in
+      {
+        inherit nvidiaDrivers nvidiaLibsOnly nixNvidiaWrapper;
+
+        nixGLNvidiaBumblebee =
+          let
+            bumblebee' = bumblebee.override {
+              nvidia_x11 = nvidiaDrivers;
+              nvidia_x11_i686 = nvidiaDrivers.lib32;
+            };
+            extraPaths = makeLibraryPath (
+              [ nvidiaDrivers ]
+              ++ optionals enable32bits [ nvidiaDrivers.lib32 ]
+              ++ [ libglvnd ]
+              ++ optionals enable32bits [ pkgsi686Linux.libglvnd ]
+            );
+          in
+          writeExecutable {
+            name = "nixGLNvidiaBumblebee-${version}";
+            envSetupText = ''
+              export LD_LIBRARY_PATH=${extraPaths}"''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            '';
+            epilogueText = ''
+              ${getExe' bumblebee' "optirun"} --ldpath ${extraPaths} "$@"
             '';
           };
 
@@ -190,7 +209,7 @@ let
     nixGLMesa = writeNixGL "nixGLMesa" [ ];
 
     nixGLIntel = writeNixGL "nixGLIntel" (
-      [ intel-media-driver ] ++ lib.optionals enable32bits [ pkgsi686Linux.intel-media-driver ]
+      [ intel-media-driver ] ++ optionals enable32bits [ pkgsi686Linux.intel-media-driver ]
     );
 
     nixVulkanMesa = writeExecutable {
@@ -204,7 +223,7 @@ let
               ls ${mesa.drivers}/share/vulkan/icd.d/*.json > f
             ''
             #  32 bits ones
-            + lib.optionalString enable32bits ''
+            + optionalString enable32bits ''
               ls ${pkgsi686Linux.mesa.drivers}/share/vulkan/icd.d/*.json >> f
             ''
             # concat everything as a one line string with ":" as seperator
@@ -212,7 +231,6 @@ let
           );
         in
         ''
-          #!${runtimeShell}
           if [ -n "$LD_LIBRARY_PATH" ]; then
             echo "Warning, nixVulkanIntel overwriting existing LD_LIBRARY_PATH" 1>&2
           fi
@@ -220,7 +238,7 @@ let
           ICDS=$(cat ${icd})
           export VK_ICD_FILENAMES=$ICDS"''${VK_ICD_FILENAMES:+:$VK_ICD_FILENAMES}"
           export LD_LIBRARY_PATH=${
-            lib.makeLibraryPath [
+            makeLibraryPath [
               zlib
               libdrm
               xorg.libX11
@@ -278,7 +296,7 @@ let
 
         autoNvidia = nvidiaPackages { version = nvidiaVersionAuto; };
       in
-      rec {
+      {
         # The output derivation contains nixGL which point either to
         # nixGLNvidia or nixGLIntel using an heuristic.
         nixGLDefault =
